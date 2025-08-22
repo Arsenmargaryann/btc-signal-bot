@@ -1,0 +1,116 @@
+# -*- coding: utf-8 -*-
+"""
+RSI+EMA Telegram Signal Bot (BTCUSDT, 1m)
+- Fetches data from Binance public API
+- Computes EMA(20) and RSI(14)
+- Sends BUY/SELL signals to a Telegram chat when price crosses EMA and RSI confirms
+"""
+
+import time
+import datetime as dtpandas
+numpy
+ta
+requests
+
+import requests
+import pandas as pd
+import ta
+
+# ========= USER SETTINGS =========
+TOKEN   = "PUT_YOUR_TELEGRAM_BOT_TOKEN_HERE"
+CHAT_ID = "PUT_YOUR_CHAT_ID_HERE"
+
+SYMBOL   = "BTCUSDT"   # Binance symbol
+INTERVAL = "1m"        # timeframe
+EMA_WIN  = 20          # EMA window
+RSI_WIN  = 14          # RSI window
+COOLDOWN_SECONDS = 5 * 60   # prevent duplicate spam within N seconds
+POLL_SECONDS = 20           # how often to poll (sec). We use last closed candle.
+# =================================
+
+last_signal_time = 0.0
+last_signal_side = None
+
+def tg_send(text: str):
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        resp = requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=10)
+        if resp.status_code != 200:
+            print("Telegram error:", resp.text)
+    except Exception as e:
+        print("Telegram exception:", e)
+
+def fetch_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataFrame:
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    data = requests.get(url, timeout=10).json()
+    cols = ["open_time","open","high","low","close","volume",
+            "close_time","qav","num_trades","taker_base","taker_quote","ignore"]
+    df = pd.DataFrame(data, columns=cols)
+    for c in ["open","high","low","close","volume"]:
+        df[c] = df[c].astype(float)
+    df["open_time"]  = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+    df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
+    return df
+
+def compute_signal(df: pd.DataFrame):
+    """Return (side, price, rsi, ema, close_time, reason) using the last CLOSED candle."""
+    # use the last CLOSED candle (index -2); -1 is still forming
+    i = -2
+    prev_i = -3
+
+    close = df["close"]
+    df["EMA"] = ta.trend.ema_indicator(close, window=EMA_WIN)
+    df["RSI"] = ta.momentum.rsi(close, window=RSI_WIN)
+
+    prev_close, prev_ema, prev_rsi = df["close"].iloc[prev_i], df["EMA"].iloc[prev_i], df["RSI"].iloc[prev_i]
+    last_close, last_ema, last_rsi = df["close"].iloc[i],    df["EMA"].iloc[i],    df["RSI"].iloc[i]
+    last_close_time = df["close_time"].iloc[i]
+
+    crossed_up   = (prev_close <= prev_ema) and (last_close > last_ema)
+    crossed_down = (prev_close >= prev_ema) and (last_close < last_ema)
+
+    side, reason = None, None
+    if crossed_up and (50 <= last_rsi < 70):
+        side = "BUY"
+        reason = "Price crossed above EMA & RSI in 50–70 (bullish but not overbought)"
+    elif crossed_down and (30 < last_rsi <= 50):
+        side = "SELL"
+        reason = "Price crossed below EMA & RSI in 30–50 (bearish but not oversold)"
+
+    return side, last_close, last_rsi, last_ema, last_close_time, reason
+
+def main_loop():
+    global last_signal_time, last_signal_side
+    tg_send("🤖 RSI+EMA բոտը մեկնարկեց • Տայմֆրեյմ: 1m • EMA(20) • RSI(14)")
+
+    while True:
+        try:
+            df = fetch_klines(SYMBOL, INTERVAL)
+            side, price, rsi, ema, ctime, reason = compute_signal(df)
+            now = time.time()
+
+            if side is not None and (side != last_signal_side or (now - last_signal_time) > COOLDOWN_SECONDS):
+                msg = (
+                    f"📢 BTC/USDT {side}\n"
+                    f"Գին: {price:.2f}\n"
+                    f"RSI({RSI_WIN}): {rsi:.1f}\n"
+                    f"EMA({EMA_WIN}): {ema:.2f}\n"
+                    f"Փակված մոմ (UTC): {ctime.strftime('%Y-%m-%d %H:%M')}\n"
+                    f"Տայմֆրեյմ: {INTERVAL}\n"
+                    f"Պատճառ: {reason}"
+                )
+                tg_send(msg)
+                last_signal_time = now
+                last_signal_side = side
+                print(msg)
+
+        except Exception as e:
+            print("Loop error:", e)
+
+        time.sleep(POLL_SECONDS)
+
+if __name__ == "__main__":
+    if "PUT_YOUR_TELEGRAM_BOT_TOKEN_HERE" in TOKEN or "PUT_YOUR_CHAT_ID_HERE" in CHAT_ID:
+        print("⚠️ Please edit TOKEN and CHAT_ID at the top of the file before running.")
+    else:
+        main_loop()
